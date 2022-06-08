@@ -45,8 +45,8 @@ fn main() {
     drop(tx);
 
     let listen_handler = runtime.spawn(async move {
-        while let Some(res) = rx.recv().await {
-            println!("Got {:?}", res);
+        while let Some(result) = rx.recv().await {
+            print_result(&result);
         }
     });
 
@@ -57,12 +57,71 @@ fn main() {
     println!("end elapse time {:?}", start.elapsed());
 }
 
+fn print_result(result: &Result<Response, ResponseError>) {
+    match result {
+        Ok(response) => {
+
+            let status_code = response.status_code.clone();
+            let body = response.body.clone();
+            let mut result_string = String::from("success");
+            let mut st_code = String::from("");
+            let mut st_desc = String::from("");
+
+            if status_code == "200" {
+                if let Some(_idx_start) = body.find("The requested URL was rejected") {
+                    result_string = "rejected".to_string();
+                }
+                // if there is errorDesc, there will not have stDesc
+                if let (Some(idx_start), Some(idx_stop)) = (body.find("<errorDesc>"), body.find("</errorDesc>")) {
+                    result_string = "error".to_string();
+                    let idx_start = idx_start + 11;
+                    if idx_start < idx_stop {
+                        st_desc = body[idx_start..idx_stop].to_string();
+                    }
+                }
+                if let (Some(idx_start), Some(idx_stop)) = (body.find("<stCode>"), body.find("</stCode>")) {
+                    let idx_start = idx_start + 8;
+                    if idx_start < idx_stop {
+                        st_code = body[idx_start..idx_stop].to_string();
+                    }
+                }
+                if st_desc == "" {
+                    if let (Some(idx_start), Some(idx_stop)) = (body.find("<stDesc>"), body.find("</stDesc>")) {
+                        let idx_start = idx_start + 8;
+                        if idx_start < idx_stop {
+                            st_desc = body[idx_start..idx_stop].to_string().clone();
+                        }
+                    }
+                }
+            }
+
+            println!("{},{},{},{},{:?},{},{}", response.csv_input.cid, response.csv_input.dob, response.status_code, result_string, response.elapse, st_code, st_desc);
+        },
+        Err(error) => {
+            println!("{},{},{},{},{:?},{},{}", error.csv_input.cid, error.csv_input.dob, "", "error", error.elapse, "", error.message);
+        }
+    }
+}
+
+fn format_dob(dob: &String) -> String {
+    let v_dob: Vec<&str> = dob.split("-").collect();
+    let mut i_dob = v_dob[0].parse::<i32>().unwrap();
+    i_dob = i_dob + 543;
+    let s_dob = format!("{}{}{}", i_dob, v_dob[1], v_dob[2]);
+    return s_dob;
+}
+
 async fn request_dopa(client: reqwest::Client, csv_input: CsvInput, tx: Sender<Result<Response, ResponseError>>) -> Result<()> {
     let start = Instant::now();
 
-    println!("request borrower id {}", csv_input.cid);
+    // println!("request borrower id {}", csv_input.cid);
 
-    let result = client.post(format!("http://ddeext-vip.pro.dsl:8086/CheckStatus/POPStatusService.asmx"))
+    let url = format!("http://ddeext-vip.pro.dsl:8086/CheckStatus/POPStatusService.asmx");
+    // let url = format!("http://localhost:8086/CheckStatus/POPStatusService.asmx");
+
+    let s_dob = format_dob(&csv_input.dob);
+    
+    let result = client.post(&url)
         .header("Content-Type", "text/xml; charset=utf-8")
         .header("SOAPAction", "http://tempuri.org/CheckDeathStatus")
         .body(
@@ -70,41 +129,33 @@ async fn request_dopa(client: reqwest::Client, csv_input: CsvInput, tx: Sender<R
                 r#"
                 <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:api="http://tempuri.org/CheckDeathStatus"><soapenv:Header/><soapenv:Body><CheckDeathStatus xmlns="http://tempuri.org/"><pid>{}</pid><dob>{}</dob></CheckDeathStatus></soapenv:Body></soapenv:Envelope>
                 "#, 
-                csv_input.cid, csv_input.dob
+                csv_input.cid, s_dob
             )
         )
         .send().await;
     let duration = start.elapsed();
-    println!("borrower id {} elapse time {:?}", csv_input.cid, duration);
+    // println!("borrower id {} elapse time {:?}", csv_input.cid, duration);
 
     let result1: Result<Response, ResponseError> = match result {
         
         Ok(res) => {
             let status_code = res.status().as_str().to_string();
             let body = res.text_with_charset("UTF-8").await.unwrap_or(String::from(""));
-            let mut new_body = String::from("");
-            if status_code == "200" {
-                if let (Some(idx_start), Some(idx_stop)) = (body.find("<stCode>"), body.find("</stCode>")) {
-                    let idx_start = idx_start + 8;
-                    new_body.push_str(&body[idx_start..idx_stop]);
-                }
-                if let (Some(idx_start), Some(idx_stop)) = (body.find("<stDesc>"), body.find("</stDesc>")) {
-                    let idx_start = idx_start + 8;
-                    new_body.push_str(&body[idx_start..idx_stop]);
-                }
-            }
+
             Ok(Response {
                 request_id: csv_input.cid.clone(),
                 status_code: status_code,
                 body: body,
-                elapse: duration
+                elapse: duration,
+                csv_input: csv_input
             })
         },
         Err(error) => {
             Err(ResponseError {
                 request_id: csv_input.cid.clone(),
                 message: error.to_string(),
-                elapse: duration
+                elapse: duration,
+                csv_input: csv_input
             })
         }
     };
@@ -128,14 +179,16 @@ async fn request(client: reqwest::Client, csv_input: CsvInput, tx: Sender<Result
                 request_id: csv_input.cid.clone(),
                 status_code: res.status().as_str().to_string(),
                 body: res.text().await.unwrap_or(String::from("")),
-                elapse: duration
+                elapse: duration,
+                csv_input: csv_input
             })
         },
         Err(error) => {
             Err(ResponseError {
                 request_id: csv_input.cid.clone(),
                 message: error.to_string(),
-                elapse: duration
+                elapse: duration,
+                csv_input: csv_input
             })
         }
     };
@@ -157,12 +210,14 @@ struct Response {
     request_id: String,
     status_code: String,
     body: String,
-    elapse: Duration
+    elapse: Duration,
+    csv_input: CsvInput
 }
 
 #[derive(Debug)]
 struct ResponseError {
     request_id: String,
     message: String,
-    elapse: Duration
+    elapse: Duration,
+    csv_input: CsvInput
 }
